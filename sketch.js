@@ -4,6 +4,7 @@ let cam;
 let handpose;
 let predictions = [];
 
+// Camera & IO
 let rotX = 0;
 let rotY = 0;
 let zoom = 800;
@@ -11,36 +12,50 @@ let targetRotX = 0;
 let targetRotY = 0;
 let targetZoom = 800;
 
+// Colors & Visuals
 let colors = [];
 let currentColorMode = 0;
+
+// State
 let modelReady = false;
 let camReady = false;
-
-// Performance optimization
 let lastHandUpdate = 0;
-const HAND_UPDATE_INTERVAL = 100;
+const HAND_UPDATE_INTERVAL = 50; // Faster updates
+
+// UI Elements (DOM)
+let uiFPS, uiCubeCount, uiStatus, uiLoading;
 
 function setup() {
-  createCanvas(windowWidth, windowHeight, WEBGL);
-  frameRate(60);
+  let canvas = createCanvas(windowWidth, windowHeight, WEBGL);
   
-  // Initialize colors
+  // High quality rendering settings
+  setAttributes('antialias', true);
+  setAttributes('perPixelLighting', true);
+  
+  // Initialize DOM connections
+  uiFPS = select('#fps-counter');
+  uiCubeCount = select('#cube-counter');
+  uiStatus = select('#status-text');
+  uiLoading = select('#loading-overlay');
+  
+  // Initialize visual systems
   initializeColors();
-  
-  // Generate initial cubes
   generateCubes();
   
-  // Setup webcam and hand tracking
+  // Setup Webcam & ML
   setupHandTracking();
 }
 
 function initializeColors() {
   colors = [
-    ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFEAA7', '#A29BFE'],
-    ['#00B894', '#FD79A8', '#FDCB6E', '#6C5CE7', '#FFFFFF'],
-    ['#FF9FF3', '#F368E0', '#FF9F43', '#EE5253', '#0ABDE3'],
-    ['#10AC84', '#5F27CD', '#54A0FF', '#EE5A24', '#C8D6E5'],
-    ['#00D2D3', '#FF6B6B', '#48DBFB', '#1DD1A1', '#F368E0']
+    // Neon Cyber
+    ['#FF0055', '#00FFE5', '#FFE600', '#7700FF', '#FFFFFF'],
+    // Forest Glass
+    ['#00FF94', '#00B8A9', '#F8F3D4', '#005F73', '#94D2BD'],
+    // Sunset
+    ['#FF5F6D', '#FFC371', '#FF9A8B', '#FF6B6B', '#C7F464'],
+    // Midnight
+    ['#2C3E50', '#E74C3C', '#ECF0F1', '#3498DB', '#2980B9']
   ];
 }
 
@@ -49,282 +64,219 @@ function generateCubes() {
   randomSeed(seed);
   cubes = [];
   
-  let gridSize = 5;
-  let spacing = 120;
+  const gridSize = 6; // Larger grid
+  const spacing = 120;
+  
+  // Create generic cube data
+  let tempCubes = [];
   
   for (let x = -gridSize; x <= gridSize; x++) {
     for (let y = -gridSize; y <= gridSize; y++) {
       for (let z = -gridSize; z <= gridSize; z++) {
-        if (random() > 0.7) {
-          let size = random(20, 50);
-          let col = color(random(colors[currentColorMode]));
+        // Density noise
+        let n = noise(x * 0.1, y * 0.1, z * 0.1);
+        
+        if (random() > 0.65) { 
+          let size = random(20, 60);
+          // Pick color index
+          let colIdx = floor(random(colors[currentColorMode].length));
+          let colStr = colors[currentColorMode][colIdx];
           
-          cubes.push({
+          tempCubes.push({
             x: x * spacing,
             y: y * spacing,
             z: z * spacing,
             size: size,
-            color: col,
-            rotationSpeed: random(0.002, 0.01),
-            pulsePhase: random(TWO_PI)
+            color: color(colStr),
+            colorStr: colStr, // for grouping
+            rotationSpeed: random(0.005, 0.02),
+            pulsePhase: random(TWO_PI),
+            roughness: random(0.1, 0.5)
           });
         }
       }
     }
   }
+  
+  // IMPORTANT: Sort by color to batch draw calls (render optimization)
+  // This minimizes state changes in the GPU loop
+  cubes = tempCubes.sort((a, b) => {
+    if (a.colorStr < b.colorStr) return -1;
+    if (a.colorStr > b.colorStr) return 1;
+    return 0;
+  });
+  
+  if (uiCubeCount) uiCubeCount.html(`Cubes: ${cubes.length}`);
 }
 
 function setupHandTracking() {
   try {
-    // Create webcam with proper error handling
-    cam = createCapture(VIDEO, function() {
-      camReady = true;
-      cam.size(320, 240);
-      
-      // Remove loading text
-      let loading = select('#loading');
-      if (loading) loading.remove();
-      
-      // Add webcam to container
-      let webcamContainer = select('#webcam-container');
-      if (webcamContainer) {
+    cam = createCapture(VIDEO, () => {
+        camReady = true;
+        cam.size(320, 240);
+        
+        // Correctly parenting the p5 element handles the DOM moving
+        // and doesn't require manual style manipulation for display:none
+        cam.parent('webcam-container');
+        
+        // Stylize the video element to fill the container
         cam.elt.style.width = '100%';
         cam.elt.style.height = '100%';
         cam.elt.style.objectFit = 'cover';
-        webcamContainer.elt.appendChild(cam.elt);
-      }
-      
-      // Setup handpose
-      handpose = ml5.handpose(cam, { flipHorizontal: true }, function() {
-        modelReady = true;
-        console.log("Handpose model ready!");
-      });
-      
-      handpose.on('predict', (results) => {
-        predictions = results;
-      });
+        cam.elt.style.display = 'block'; // Ensure it's visible
+
+        uiStatus.html('Loading Hand Model...');
+        
+        handpose = ml5.handpose(cam, { flipHorizontal: true }, () => {
+            modelReady = true;
+            console.log("Handpose ready");
+            uiStatus.html('System Ready');
+            uiLoading.addClass('hidden'); // Fade out loader
+        });
+
+        handpose.on('predict', results => predictions = results);
     });
-    
-  } catch (error) {
-    console.error("Webcam setup failed:", error);
-    let loading = select('#loading');
-    if (loading) loading.html('Camera access denied<br>Using mouse control');
+  } catch (e) {
+    console.error(e);
+    uiStatus.html('Camera Error - Mouse OK');
+    uiLoading.addClass('hidden');
   }
 }
 
 function updateHandControl() {
   if (!modelReady || predictions.length === 0) {
-    // Fallback to mouse control
-    targetRotX = map(mouseY, 0, height, -PI/2, PI/2);
-    targetRotY = map(mouseX, 0, width, -PI, PI);
+    // Mouse Interaction
+    // Normalized coordinates (-1 to 1)
+    let mx = (mouseX - width/2) / width;
+    let my = (mouseY - height/2) / height;
+    
+    // Smooth falloff to center
+    targetRotY = mx * PI;
+    targetRotX = -my * PI; // Invert Y for natural feel
     return;
   }
   
   let hand = predictions[0];
-  
-  // Use landmarks for control - ml5 handpose returns landmarks array
-  if (hand.landmarks && hand.landmarks.length > 0) {
-    let wrist = hand.landmarks[0]; // wrist is index 0
-    let indexTip = hand.landmarks[8]; // index finger tip
-    
-    if (wrist && indexTip) {
-      // Map hand position to rotation
-      targetRotX = map(wrist[1], 0, cam.height, -PI/2, PI/2);
-      targetRotY = map(wrist[0], 0, cam.width, -PI, PI);
-      
-      // Use hand size for zoom
-      let handSize = dist(wrist[0], wrist[1], indexTip[0], indexTip[1]);
-      targetZoom = map(handSize, 50, 200, 500, 1200);
-    }
+  if (hand.landmarks) {
+     // Landmark 9 is middle finger mcp (roughly center of hand)
+     let palm = hand.landmarks[9];
+     let thumb = hand.landmarks[4];
+     let index = hand.landmarks[8];
+     
+     if (palm) {
+         // Map Hand X/Y to Rotation
+         // Webcam is 320x240
+         let nx = palm[0] / 320;
+         let ny = palm[1] / 240;
+         
+         // Remap to rotation angles
+         // Center (0.5) = 0 rotation
+         targetRotY = (nx - 0.5) * TWO_PI; // Wider range
+         targetRotX = (ny - 0.5) * PI;
+     }
+     
+     // Pinch to Zoom
+     if (thumb && index) {
+         let pinchDist = dist(thumb[0], thumb[1], index[0], index[1]);
+         // Simple remapping: Pinch close = Zoom OUT, Fingers apart = Zoom IN
+         // Normal pinch is ~20-30, Open is ~100+
+         targetZoom = map(pinchDist, 20, 150, 1500, 200, true);
+     }
   }
 }
 
 function draw() {
-  background(0);
+  background(10); // Very dark gray, not fully black for depth
   
-  // Update hand control less frequently for performance
+  // Logic Update
   if (millis() - lastHandUpdate > HAND_UPDATE_INTERVAL) {
     updateHandControl();
     lastHandUpdate = millis();
   }
   
-  // Smooth camera interpolation
-  rotX = lerp(rotX, targetRotX, 0.1);
-  rotY = lerp(rotY, targetRotY, 0.1);
-  zoom = lerp(zoom, targetZoom, 0.1);
+  // Physics / Smoothing
+  rotX = lerp(rotX, targetRotX, 0.08); // Smoother
+  rotY = lerp(rotY, targetRotY, 0.08);
+  zoom = lerp(zoom, targetZoom, 0.05); // Heavy smoothing for zoom
   
-  // Camera setup
+  // -----------------------
+  // 3D Scene Setup
+  // -----------------------
   translate(0, 0, -zoom);
   rotateX(rotX);
   rotateY(rotY);
   
-  // Lighting
-  ambientLight(100);
-  directionalLight(255, 255, 255, 0.5, 0.5, -1);
-  pointLight(200, 200, 255, 
-    sin(frameCount * 0.01) * 300,
-    cos(frameCount * 0.01) * 300,
-    200
-  );
+  // Dynamic Lighting
+  ambientLight(40);
   
-  // Draw cubes
-  for (let i = 0; i < cubes.length; i++) {
-    let cube = cubes[i];
+  // Main directional light
+  directionalLight(255, 255, 255, 0.5, 1, -1);
+  
+  // Moving colorful lights
+  let t = frameCount * 0.02;
+  pointLight(255, 0, 100, 500 * sin(t), 500 * cos(t), 500);
+  pointLight(0, 200, 255, 500 * cos(t*0.7), 500 * sin(t*0.7), -500);
+
+  // -----------------------
+  // Render Cubes
+  // -----------------------
+  // Use batching strategies
+  noStroke();
+  
+  // Since we sorted cubes by color, we can set material once per color group
+  let lastColorStr = '';
+  
+  for (let cube of cubes) {
+    // Check if color changed
+    if (cube.colorStr !== lastColorStr) {
+       fill(cube.color);
+       // Add material properties
+       specularMaterial(200); 
+       shininess(30);
+       lastColorStr = cube.colorStr;
+    }
     
     push();
     translate(cube.x, cube.y, cube.z);
     
-    // Rotate cubes
-    rotateX(frameCount * cube.rotationSpeed);
-    rotateY(frameCount * cube.rotationSpeed * 1.5);
+    // Animation
+    let rSpeed = cube.rotationSpeed;
+    rotateX(frameCount * rSpeed);
+    rotateY(frameCount * rSpeed * 1.5);
     
-    // Pulsing effect
-    let pulse = sin(frameCount * 0.05 + cube.pulsePhase) * 5;
-    let currentSize = cube.size + pulse;
+    // Pulse
+    let pulse = sin(frameCount * 0.05 + cube.pulsePhase);
+    let size = cube.size + (pulse * 4);
     
-    fill(cube.color);
-    noStroke();
-    
-    box(currentSize);
+    box(size);
     pop();
   }
   
-  // Draw webcam preview with hand landmarks
-  drawWebcamPreview();
-  
-  // Display status
-  drawStatus();
-}
-
-function drawWebcamPreview() {
-  if (!camReady) return;
-  
-  // Draw webcam feed in corner
-  push();
-  
-  // Switch to 2D mode
-  resetMatrix();
-  drawingContext.disable(drawingContext.DEPTH_TEST);
-  
-  // Position in bottom right corner
-  let previewWidth = 200;
-  let previewHeight = 150;
-  let x = width - previewWidth - 20;
-  let y = height - previewHeight - 20;
-  
-  // Draw webcam background
-  fill(0);
-  stroke(255);
-  strokeWeight(2);
-  rect(x, y, previewWidth, previewHeight);
-  
-  // Draw webcam image
-  image(cam, x, y, previewWidth, previewHeight);
-  
-  // Draw hand landmarks if detected
-  if (predictions.length > 0) {
-    drawHandLandmarks(x, y, previewWidth, previewHeight);
-  }
-  
-  drawingContext.enable(drawingContext.DEPTH_TEST);
-  pop();
-}
-
-function drawHandLandmarks(x, y, width, height) {
-  push();
-  
-  let hand = predictions[0];
-  
-  if (hand.landmarks && Array.isArray(hand.landmarks)) {
-    // Scale factors to map from cam coordinates to preview coordinates
-    let scaleX = width / cam.width;
-    let scaleY = height / cam.height;
-    
-    // Draw landmarks as points
-    fill(0, 255, 0);
-    noStroke();
-    
-    for (let i = 0; i < hand.landmarks.length; i++) {
-      let landmark = hand.landmarks[i];
-      let px = x + landmark[0] * scaleX;
-      let py = y + landmark[1] * scaleY;
-      circle(px, py, 6);
-    }
-    
-    // Draw connections between landmarks
-    stroke(255, 0, 0);
-    strokeWeight(2);
-    noFill();
-    
-    // Define hand connections (simplified)
-    const connections = [
-      [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
-      [0, 5], [5, 6], [6, 7], [7, 8], // Index
-      [0, 9], [9, 10], [10, 11], [11, 12], // Middle
-      [0, 13], [13, 14], [14, 15], [15, 16], // Ring
-      [0, 17], [17, 18], [18, 19], [19, 20] // Pinky
-    ];
-    
-    for (let i = 0; i < connections.length; i++) {
-      let [start, end] = connections[i];
-      if (hand.landmarks[start] && hand.landmarks[end]) {
-        let startX = x + hand.landmarks[start][0] * scaleX;
-        let startY = y + hand.landmarks[start][1] * scaleY;
-        let endX = x + hand.landmarks[end][0] * scaleX;
-        let endY = y + hand.landmarks[end][1] * scaleY;
-        
-        line(startX, startY, endX, endY);
+  // -----------------------
+  // UI Updates
+  // -----------------------
+  if (frameCount % 10 === 0) { // Throttle DOM updates
+      if (uiFPS) uiFPS.html(`FPS: ${floor(frameRate())}`);
+      if (modelReady && predictions.length > 0) {
+          uiStatus.html('Tracking Hand');
+          uiStatus.style('color', '#00ff9d');
+      } else if (modelReady) {
+          uiStatus.html('No Hand Detected');
+          uiStatus.style('color', '#ffaa00');
       }
-    }
   }
-  
-  pop();
 }
 
-function drawStatus() {
-  push();
-  fill(255);
-  noStroke();
-  textAlign(LEFT);
-  textSize(14);
-  
-  let statusY = -height/2 + 30;
-  text(`Cubes: ${cubes.length}`, -width/2 + 20, statusY);
-  text(`FPS: ${frameRate().toFixed(1)}`, -width/2 + 20, statusY + 20);
-  
-  let controlStatus = 'Mouse';
-  if (modelReady) {
-    controlStatus = predictions.length > 0 ? 'Hand Tracking' : 'Hand Ready (no hand detected)';
-  }
-  
-  text(`Control: ${controlStatus}`, -width/2 + 20, statusY + 40);
-  text(`Colors: Mode ${currentColorMode + 1}`, -width/2 + 20, statusY + 60);
-  
-  pop();
-}
-
+// Interactions
 function keyPressed() {
-  if (key === 'r' || key === 'R') {
-    generateCubes();
-    return false;
-  }
-  if (key === 'c' || key === 'C') {
-    currentColorMode = (currentColorMode + 1) % colors.length;
-    generateCubes();
-    return false;
-  }
-  if (key === 's' || key === 'S') {
-    saveCanvas('3d_hand_cubes', 'png');
-    return false;
-  }
-}
-
-function mouseWheel(event) {
-  targetZoom += event.delta * 0.5;
-  targetZoom = constrain(targetZoom, 300, 1500);
-  return false;
+    if (key === 'r' || key === 'R') generateCubes();
+    if (key === 'c' || key === 'C') {
+        currentColorMode = (currentColorMode + 1) % colors.length;
+        generateCubes();
+    }
+    if (key === 's' || key === 'S') saveCanvas('my_hand_art', 'png');
 }
 
 function windowResized() {
-  resizeCanvas(windowWidth, windowHeight);
+    resizeCanvas(windowWidth, windowHeight);
 }
