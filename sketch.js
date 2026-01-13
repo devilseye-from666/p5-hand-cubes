@@ -1,5 +1,7 @@
 let seed;
 let cubes = [];
+let particles = [];
+let stars = [];
 let cam;
 let handpose;
 let predictions = [];
@@ -15,7 +17,7 @@ let targetZoom = 800;
 // Interaction State
 let handPos = { x: 0, y: 0, z: 0, active: false };
 let lastActivityTime = 0;
-const IDLE_TIMEOUT = 2000; // 2 seconds to auto-rotate
+const IDLE_TIMEOUT = 2000;
 
 // Visuals
 let colors = [];
@@ -25,25 +27,163 @@ let currentColorMode = 0;
 let modelReady = false;
 let camReady = false;
 let lastHandUpdate = 0;
-const HAND_UPDATE_INTERVAL = 30; // High responsiveness
+const HAND_UPDATE_INTERVAL = 30;
 
 // UI Elements
 let uiFPS, uiCubeCount, uiStatus, uiLoading;
 
+// --- Classes ---
+
+class Star {
+  constructor() {
+    this.x = random(-2000, 2000);
+    this.y = random(-2000, 2000);
+    this.z = random(-2000, 2000);
+    this.size = random(1, 4);
+    this.brightness = random(150, 255);
+  }
+
+  display() {
+    push();
+    translate(this.x, this.y, this.z);
+    stroke(255, this.brightness);
+    strokeWeight(this.size);
+    point(0, 0);
+    pop();
+  }
+}
+
+class Particle {
+  constructor(x, y, z, colorStr) {
+    this.pos = createVector(x, y, z);
+    this.vel = p5.Vector.random3D().mult(random(2, 8));
+    this.acc = createVector(0, 0, 0);
+    this.life = 255;
+    this.colorStr = colorStr;
+    this.decay = random(4, 8);
+  }
+
+  update() {
+    this.vel.add(this.acc);
+    this.pos.add(this.vel);
+    this.life -= this.decay;
+    this.vel.mult(0.95); // Drag
+  }
+
+  display() {
+    if (this.life <= 0) return;
+    push();
+    translate(this.pos.x, this.pos.y, this.pos.z);
+    noStroke();
+    fill(color(this.colorStr)); // Use raw color or parse it? P5 handles strings fine usually
+    // We need alpha, so let's use the color object if possible, but for performance string is ok + fast generic fade 
+    // Actually applying alpha to a hex string is tricky without parsing.
+    // Let's just use emissive material for glow effect or simple fill
+    emissiveMaterial(this.life, this.life, this.life);
+    sphere(2);
+    pop();
+  }
+
+  isDead() {
+    return this.life <= 0;
+  }
+}
+
+class Cube {
+  constructor(x, y, z, size, colorStr) {
+    this.basePos = createVector(x, y, z);
+    this.pos = this.basePos.copy();
+    this.vel = createVector(0, 0, 0);
+    this.acc = createVector(0, 0, 0);
+    
+    this.size = size;
+    this.baseSize = size;
+    this.colorStr = colorStr;
+    this.c = color(colorStr);
+    
+    // Spring Physics Properties
+    this.mass = map(size, 20, 50, 1, 4); 
+    this.springK = 0.1;  // Stiffness
+    this.damping = 0.85; // Friction
+    
+    this.rotationSpeed = random(0.005, 0.02);
+    this.pulsePhase = random(TWO_PI);
+  }
+
+  update() {
+    // 1. Spring Force towards base position
+    let springForce = p5.Vector.sub(this.basePos, this.pos);
+    springForce.mult(this.springK);
+    this.applyForce(springForce);
+
+    // 2. Repulsion from Hand
+    if (handPos.active) {
+      // Approximate World Space distance
+      let d = dist(this.pos.x, this.pos.y, this.pos.z, handPos.x, handPos.y, handPos.z);
+      if (d < 350) {
+        let repDir = p5.Vector.sub(this.pos, createVector(handPos.x, handPos.y, handPos.z));
+        repDir.normalize();
+        let forceMag = map(d, 0, 350, 15, 0); // Stronger force
+        repDir.mult(forceMag);
+        this.applyForce(repDir);
+        
+        // Spawn particles on strong interaction
+        if (d < 100 && random() < 0.1) {
+             particles.push(new Particle(this.pos.x, this.pos.y, this.pos.z, this.colorStr));
+        }
+      }
+    }
+
+    // 3. Integration
+    this.vel.add(this.acc);
+    this.pos.add(this.vel);
+    this.vel.mult(this.damping);
+    this.acc.mult(0); // Reset Ax
+  }
+
+  applyForce(f) {
+    let fCopy = f.copy();
+    fCopy.div(this.mass);
+    this.acc.add(fCopy);
+  }
+
+  display() {
+    push();
+    translate(this.pos.x, this.pos.y, this.pos.z);
+    
+    // Dynamic Rotation based on velocity + idle spin
+    rotateX(frameCount * this.rotationSpeed + this.vel.y * 0.05);
+    rotateY(frameCount * this.rotationSpeed * 1.5 + this.vel.x * 0.05);
+    
+    // Pulse size
+    let velMag = this.vel.mag(); // Stretch when moving fast
+    let pulse = sin(frameCount * 0.05 + this.pulsePhase);
+    let currentSize = this.baseSize + (pulse * 2) + (velMag * 2);
+    
+    fill(this.c);
+    specularMaterial(255); 
+    shininess(map(velMag, 0, 10, 10, 100)); // Shinier when moving
+    
+    box(currentSize);
+    pop();
+  }
+}
+
+// --- Main Functions ---
+
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
   
-  // Premium Rendering Settings
   setAttributes('antialias', true);
   setAttributes('perPixelLighting', true);
   
-  // DOM Elements
   uiFPS = select('#fps-counter');
   uiCubeCount = select('#cube-counter');
   uiStatus = select('#status-text');
   uiLoading = select('#loading-overlay');
   
   initializeColors();
+  generateStars();
   generateCubes();
   setupHandTracking();
   
@@ -59,52 +199,46 @@ function initializeColors() {
   ];
 }
 
+function generateStars() {
+  stars = [];
+  for(let i = 0; i < 400; i++) {
+    stars.push(new Star());
+  }
+}
+
 function generateCubes() {
   seed = random(100000);
   randomSeed(seed);
   cubes = [];
   
-  const gridSize = 6;
-  const spacing = 120; // More space for interaction
+  const gridSize = 5; // Slightly reduced grid for performance with physics
+  const spacing = 130;
   
   let tempCubes = [];
   
   for (let x = -gridSize; x <= gridSize; x++) {
     for (let y = -gridSize; y <= gridSize; y++) {
       for (let z = -gridSize; z <= gridSize; z++) {
-        // Density noise for organic shape
         let n = noise(x * 0.1, y * 0.1, z * 0.1);
-        
-        if (random() > 0.70) { 
+        if (random() > 0.65) { 
           let size = random(20, 50);
           let colIdx = floor(random(colors[currentColorMode].length));
           let colStr = colors[currentColorMode][colIdx];
           
-          tempCubes.push({
-            // Base Position
-            bx: x * spacing,
-            by: y * spacing,
-            bz: z * spacing,
-            // Current Position (for physics)
-            x: x * spacing,
-            y: y * spacing,
-            z: z * spacing,
-            
-            size: size,
-            baseSize: size,
-            color: color(colStr),
-            colorStr: colStr,
-            
-            // Animation props
-            rotationSpeed: random(0.005, 0.02),
-            pulsePhase: random(TWO_PI),
-          });
+          tempCubes.push(new Cube(
+            x * spacing, 
+            y * spacing, 
+            z * spacing, 
+            size, 
+            colStr
+          ));
         }
       }
     }
   }
   
-  // Sort for batch rendering
+  // Sort by color for batching (optimization) - though P5 might not batch standard primitives easily without custom geometry, 
+  // it helps state changes.
   cubes = tempCubes.sort((a, b) => (a.colorStr > b.colorStr) ? 1 : -1);
   
   if (uiCubeCount) uiCubeCount.html(`Cubes: ${cubes.length}`);
@@ -148,175 +282,116 @@ function updateInput() {
       
       let hand = predictions[0];
       if (hand.landmarks) {
-          let palm = hand.landmarks[9]; // Hand center
+          let palm = hand.landmarks[9];
           let thumb = hand.landmarks[4];
           let index = hand.landmarks[8];
           
           if (palm) {
-              // Map 2D hand to 3D Rotation
               let nx = palm[0] / 320;
               let ny = palm[1] / 240;
               targetRotY = (nx - 0.5) * TWO_PI;
               targetRotX = (ny - 0.5) * PI;
               
-              // Map to 3D World Position (approximate)
-              // This creates the "Cursor" in 3D space
-              // We invert X/Y to match screen movement
-              handPos.x = (nx - 0.5) * 1000; 
-              handPos.y = (ny - 0.5) * 1000;
-              handPos.z = 200; // Hover in front
+              handPos.x = (nx - 0.5) * 1200; 
+              handPos.y = (ny - 0.5) * 1200;
+              handPos.z = 300; 
           }
           
           if (thumb && index) {
-              // Pinch Zoom
               let d = dist(thumb[0], thumb[1], index[0], index[1]);
               targetZoom = map(d, 20, 150, 1500, 300, true);
           }
       }
   } 
-  // 2. Mouse Input (Fallback/Override)
+  // 2. Mouse Input
   else if (mouseIsPressed || (mouseX !== pmouseX || mouseY !== pmouseY)) {
       lastActivityTime = now;
       handPos.active = true;
-      // Mouse overrides rotation
       let mx = (mouseX - width/2) / width;
       let my = (mouseY - height/2) / height;
       targetRotY = mx * PI;
       targetRotX = -my * PI;
       
-      // Mouse cursor in 3D (approx)
-      handPos.x = mx * 1000;
-      handPos.y = my * 1000;
-      handPos.z = 200;
+      handPos.x = mx * 1200;
+      handPos.y = my * 1200;
+      handPos.z = 300;
   }
   // 3. Idle Mode
   else {
       handPos.active = false;
       if (now - lastActivityTime > IDLE_TIMEOUT) {
-          // Auto rotate
-          targetRotY += 0.005;
-          targetRotX = sin(now * 0.001) * 0.5;
-          targetZoom = 900 + sin(now * 0.0005) * 200;
+          targetRotY += 0.003;
+          targetRotX = sin(now * 0.0005) * 0.3;
+          targetZoom = 1000 + sin(now * 0.0003) * 300;
       }
   }
 }
 
 function draw() {
-  background(8); 
+  // Deep space background
+  background(5, 5, 12); 
   
   if (millis() - lastHandUpdate > HAND_UPDATE_INTERVAL) {
     updateInput();
     lastHandUpdate = millis();
   }
   
-  // Smooth Camera
-  rotX = lerp(rotX, targetRotX, 0.08);
-  rotY = lerp(rotY, targetRotY, 0.08);
+  rotX = lerp(rotX, targetRotX, 0.05);
+  rotY = lerp(rotY, targetRotY, 0.05);
   zoom = lerp(zoom, targetZoom, 0.05);
 
-  // Scene Transform
   push();
   translate(0, 0, -zoom);
   rotateX(rotX);
   rotateY(rotY);
 
-  // --- Lighting & Atmosphere ---
-  ambientLight(50);
+  // --- Lighting ---
+  ambientLight(40);
   directionalLight(255, 255, 255, 0.5, 0.8, -1);
-  
-  // Dynamic Colored Lights
   let t = frameCount * 0.02;
-  pointLight(255, 0, 100, 600 * sin(t), 600 * cos(t), 500);
-  pointLight(0, 100, 255, 600 * cos(t*0.7), 600 * sin(t*0.5), -500);
+  pointLight(255, 0, 100, 800 * sin(t), 800 * cos(t), 600);
+  pointLight(0, 100, 255, 800 * cos(t*0.7), 800 * sin(t*0.5), -600);
 
-  // --- Draw Hand Cursor ---
+  // --- Draw Stars ---
+  // Rotate starfield slowly oppositely for depth
+  push();
+  rotateY(frameCount * -0.001);
+  for(let star of stars) star.display();
+  pop();
+
+  // --- Draw Cursor ---
   if (handPos.active) {
       push();
       translate(handPos.x, handPos.y, handPos.z);
-      
-      // Cursor Glow
       noStroke();
       fill(255, 200);
       emissiveMaterial(255, 255, 255);
       sphere(15);
+      pointLight(255, 255, 220, 0, 0, 0);
       
-      // Cursor Light
-      pointLight(255, 255, 200, 0, 0, 0);
+      // Cursor Trail helper
+      if(frameCount % 5 === 0) {
+        particles.push(new Particle(handPos.x, handPos.y, handPos.z, '#FFFFFF'));
+      }
       pop();
   }
 
-  // --- Draw Cubes with Physics ---
-  noStroke();
-  let lastColorStr = '';
+  // --- Cubes ---
+  // Optimization: Cubes are sorted by color in generate to minimize state changes if we moved rendering logic here.
+  // Currently, each cube handles its own styling for dynamic effects (shininess), so we iterate directly.
   
-  // Transform Hand Pos to Local Frame (Inverse Rotate)
-  // Actually, we are rotating the WORLD, so the hand pos is already in world space relative to camera?
-  // Let's keep physics simple: Distance based on the unrotated grid vs rotated hand is complex.
-  // APPROXIMATION: We repel based on the static grid coordinates vs the "world" cursor reversed.
-  // A better way is to move the cursor with the camera, which we did.
-
   for (let cube of cubes) {
-    // 1. Calculate Interaction
-    // Distance from Cursor to Cube Center
-    // Since we rotate the whole world, the cursor (which moves with camera rotation mapping)
-    // acts effectively as a raycast. 
-    
-    // BUT! Since `translate(x,y,z)` happens inside the rotation, 
-    // we need to calculate the actual screenspace-ish distance or world distance.
-    // For simplicity, let's just use the `handPos` which scales roughly to the grid.
-    
-    let d = dist(cube.bx, cube.by, cube.bz, handPos.x, handPos.y, handPos.z);
-    let repulsion = 0;
-    
-    if (handPos.active && d < 300) {
-       // Repulsion vector
-       let force = map(d, 0, 300, 100, 0);
-       repulsion = force;
-    }
-    
-    // Apply Physics to Cube (Move away from cursor)
-    // Vector from cursor to cube
-    let dx = cube.bx - handPos.x;
-    let dy = cube.by - handPos.y;
-    let dz = cube.bz - handPos.z;
-    
-    // Normalize and scale
-    let mag = sqrt(dx*dx + dy*dy + dz*dz);
-    if (mag > 0) {
-        dx /= mag; dy /= mag; dz /= mag;
-    }
-    
-    // Target position (Base + Repulsion)
-    let tx = cube.bx + dx * repulsion;
-    let ty = cube.by + dy * repulsion;
-    let tz = cube.bz + dz * repulsion;
-    
-    // Smoothly interpolate current pos to target
-    cube.x = lerp(cube.x, tx, 0.1);
-    cube.y = lerp(cube.y, ty, 0.1);
-    cube.z = lerp(cube.z, tz, 0.1);
+    cube.update();
+    cube.display();
+  }
 
-    // 2. Rendering
-    if (cube.colorStr !== lastColorStr) {
-       fill(cube.color);
-       specularMaterial(200);
-       shininess(40);
-       lastColorStr = cube.colorStr;
+  // --- Particles ---
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update();
+    particles[i].display();
+    if (particles[i].isDead()) {
+      particles.splice(i, 1);
     }
-    
-    push();
-    translate(cube.x, cube.y, cube.z);
-    
-    rotateX(frameCount * cube.rotationSpeed);
-    rotateY(frameCount * cube.rotationSpeed * 1.5);
-    
-    // Dynamic Size (Grow when close to hand)
-    let grow = (repulsion > 10) ? map(repulsion, 10, 100, 1, 1.5) : 1;
-    let pulse = sin(frameCount * 0.05 + cube.pulsePhase);
-    let size = cube.baseSize * grow + (pulse * 3);
-    
-    box(size);
-    pop();
   }
   
   pop(); // End Scene
@@ -325,16 +400,15 @@ function draw() {
   if (frameCount % 10 === 0) {
       if(uiFPS) uiFPS.html(`FPS: ${floor(frameRate())}`);
       if(handPos.active) {
-          uiStatus.html('Hand Active');
+          uiStatus.html('System Active');
           uiStatus.style('color', '#00ff9d');
       } else {
-          uiStatus.html('Idle / Auto-Pilot');
+          uiStatus.html('Standby Mode');
           uiStatus.style('color', '#00aaff');
       }
   }
 }
 
-// Interactions
 function keyPressed() {
     if (key === 'r' || key === 'R') generateCubes();
     if (key === 'c' || key === 'C') {
