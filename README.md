@@ -6,10 +6,11 @@ An interactive, high-performance 3D art sketch using **p5.js** and **ml5.js**. C
 
 - **👋 Hand & Mouse Interaction**:
   - **3D Cursor**: A glowing orb tracks your hand in real-time.
-  - **Physics Interaction**: Cubes react, grow, and float away when touched.
+  - **Spring Physics**: Cubes bounce, wobble, and react elastically to your touch.
+  - **Particle Effects**: Magical sparks appear when you interact with the world.
   - **Smart Idle**: Enters a cinematic auto-rotate mode when inactive.
 - **⚡ High Performance**: Optimized rendering using state batching and geometry grouping.
-- **🎨 Visuals**: Dynamic lighting, shininess/specular materials, and neon color palettes.
+- **🎨 Visuals**: 3D Starfield background, dynamic lighting, and shininess based on velocity.
 - **🖥️ Modern UI**: Clean HTML overlay for stats and controls.
 
 ## Controls
@@ -27,8 +28,9 @@ An interactive, high-performance 3D art sketch using **p5.js** and **ml5.js**. C
 
 ### Optimizations
 
-- **Physics**: Simple distance-based repulsion forces applied in the render loop.
-- **Render Batching**: Cubes are sorted by color to minimize GPU state changes.
+- **Physics**: Real-time **Spring Physics** (Hooke's Law) for elastic, organic movement.
+- **Render Batching**: Cubes are sorted by color for optimized state management.
+- **Particle System**: Dynamic sparks and trails upon interaction.
 - **DOM UI**: Text rendering is moved out of the WebGL context.
 
 ### Project Structure
